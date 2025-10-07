@@ -2,6 +2,7 @@ const COLS = 10;
 const ROWS = 20;
 let BLOCK_SIZE = 30;
 const DROP_BASE_INTERVAL = 1000;
+const LINE_CLEAR_DURATION = 400;
 
 const COLORS = {
     I: '#38bdf8',
@@ -162,6 +163,22 @@ const TETROMINOES = {
 
 const LINE_SCORES = [0, 100, 300, 500, 800];
 
+function clamp(value, min, max) {
+    return Math.min(Math.max(value, min), max);
+}
+
+function blendWithWhite(hexColor, amount) {
+    const normalized = clamp(amount, 0, 1);
+    const value = parseInt(hexColor.slice(1), 16);
+    const r = (value >> 16) & 255;
+    const g = (value >> 8) & 255;
+    const b = value & 255;
+    const blendedR = Math.round(r + (255 - r) * normalized);
+    const blendedG = Math.round(g + (255 - g) * normalized);
+    const blendedB = Math.round(b + (255 - b) * normalized);
+    return `rgb(${blendedR}, ${blendedG}, ${blendedB})`;
+}
+
 class Board {
     constructor(cols, rows) {
         this.cols = cols;
@@ -202,17 +219,26 @@ class Board {
         });
     }
 
-    clearLines() {
-        let cleared = 0;
-        for (let y = this.rows - 1; y >= 0; y--) {
+    findFullLines() {
+        const fullLines = [];
+        for (let y = 0; y < this.rows; y++) {
             if (this.grid[y].every(cell => cell !== null)) {
-                this.grid.splice(y, 1);
-                this.grid.unshift(Array(this.cols).fill(null));
-                cleared += 1;
-                y += 1; // recheck the same row index after unshift
+                fullLines.push(y);
             }
         }
-        return cleared;
+        return fullLines;
+    }
+
+    removeLines(lineIndices) {
+        if (!lineIndices || lineIndices.length === 0) {
+            return;
+        }
+        const sorted = [...lineIndices].sort((a, b) => a - b);
+        for (let i = sorted.length - 1; i >= 0; i--) {
+            const rowIndex = sorted[i];
+            this.grid.splice(rowIndex, 1);
+            this.grid.unshift(Array(this.cols).fill(null));
+        }
     }
 }
 
@@ -258,6 +284,7 @@ class Game {
         this.dropCounter = 0;
         this.dropInterval = DROP_BASE_INTERVAL;
         this.lastTime = 0;
+        this.lineClearAnimation = null;
         this.score = 0;
         this.lines = 0;
         this.level = 1;
@@ -319,6 +346,9 @@ class Game {
         });
 
         this.startButton.addEventListener('click', () => {
+            if (this.lineClearAnimation) {
+                return;
+            }
             if (this.gameOver || !this.activePiece) {
                 this.startGame();
             } else {
@@ -348,6 +378,7 @@ class Game {
         this.gameOver = false;
         this.paused = false;
         this.nextPiece = this.randomPiece();
+        this.lineClearAnimation = null;
         this.updateCanvasSizes();
         this.spawnPiece();
         this.hideOverlay();
@@ -440,17 +471,18 @@ class Game {
     }
 
     lockPiece() {
-        this.board.placePiece(this.activePiece);
-        const clearedLines = this.board.clearLines();
-        if (clearedLines > 0) {
-            this.lines += clearedLines;
-            const lineScore = LINE_SCORES[clearedLines] || 0;
-            this.addScore(lineScore * this.level);
-            this.level = Math.floor(this.lines / 10) + 1;
-            const speedMultiplier = Math.pow(0.85, this.level - 1);
-            this.dropInterval = Math.max(100, DROP_BASE_INTERVAL * speedMultiplier);
+        if (!this.activePiece) {
+            return;
         }
-        this.spawnPiece();
+        this.board.placePiece(this.activePiece);
+        this.dropCounter = 0;
+        const linesToClear = this.board.findFullLines();
+        this.activePiece = null;
+        if (linesToClear.length > 0) {
+            this.startLineClearAnimation(linesToClear);
+        } else {
+            this.spawnPiece();
+        }
         this.draw();
     }
 
@@ -515,11 +547,16 @@ class Game {
         this.lastTime = time;
         this.dropCounter += delta;
 
-        if (this.dropCounter > this.dropInterval) {
-            if (!this.moveDown()) {
-                this.lockPiece();
-            }
+        if (this.lineClearAnimation) {
             this.dropCounter = 0;
+            this.updateLineClearAnimation();
+        } else if (this.activePiece) {
+            if (this.dropCounter > this.dropInterval) {
+                if (!this.moveDown()) {
+                    this.lockPiece();
+                }
+                this.dropCounter = 0;
+            }
         }
 
         this.draw();
@@ -553,10 +590,22 @@ class Game {
             ctx.stroke();
         }
 
+        const animation = this.lineClearAnimation;
+        const clearingLines = animation ? new Set(animation.lines) : null;
+        const progress = animation ? clamp(animation.progress || 0, 0, 1) : 0;
+
         this.board.grid.forEach((row, y) => {
             row.forEach((cell, x) => {
                 if (cell) {
-                    this.drawBlock(x, y, COLORS[cell]);
+                    if (clearingLines && clearingLines.has(y)) {
+                        const pulse = Math.sin(progress * Math.PI * 6) ** 2;
+                        const lighten = clamp(0.3 + progress * 0.7 + pulse * 0.2, 0, 1);
+                        const fade = clamp(1 - progress, 0, 1);
+                        const displayColor = blendWithWhite(COLORS[cell], lighten);
+                        this.drawBlock(x, y, displayColor, fade);
+                    } else {
+                        this.drawBlock(x, y, COLORS[cell]);
+                    }
                 }
             });
         });
@@ -591,14 +640,63 @@ class Game {
         this.boardCtx.restore();
     }
 
-    drawBlock(x, y, color) {
+    drawBlock(x, y, color, alpha = null) {
         const ctx = this.boardCtx;
         const px = x * BLOCK_SIZE;
         const py = y * BLOCK_SIZE;
+        ctx.save();
+        if (alpha !== null) {
+            ctx.globalAlpha = alpha;
+        }
         ctx.fillStyle = color;
         ctx.fillRect(px + 1, py + 1, BLOCK_SIZE - 2, BLOCK_SIZE - 2);
         ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
         ctx.strokeRect(px + 1, py + 1, BLOCK_SIZE - 2, BLOCK_SIZE - 2);
+        ctx.restore();
+    }
+
+    startLineClearAnimation(lines) {
+        this.lineClearAnimation = {
+            lines,
+            start: performance.now(),
+            duration: LINE_CLEAR_DURATION,
+            progress: 0,
+            level: this.level
+        };
+    }
+
+    updateLineClearAnimation() {
+        if (!this.lineClearAnimation) {
+            return;
+        }
+        const now = performance.now();
+        const elapsed = now - this.lineClearAnimation.start;
+        this.lineClearAnimation.progress = clamp(elapsed / this.lineClearAnimation.duration, 0, 1);
+        if (elapsed >= this.lineClearAnimation.duration) {
+            this.finishLineClear();
+        }
+    }
+
+    finishLineClear() {
+        const animation = this.lineClearAnimation;
+        if (!animation) {
+            return;
+        }
+        const clearedLines = animation.lines.length;
+        this.board.removeLines(animation.lines);
+        if (clearedLines > 0) {
+            this.lines += clearedLines;
+            const lineScore = LINE_SCORES[clearedLines] || 0;
+            this.addScore(lineScore * animation.level);
+            this.level = Math.floor(this.lines / 10) + 1;
+            const speedMultiplier = Math.pow(0.85, this.level - 1);
+            this.dropInterval = Math.max(100, DROP_BASE_INTERVAL * speedMultiplier);
+            this.updateStats();
+        }
+        this.lineClearAnimation = null;
+        this.dropCounter = 0;
+        this.spawnPiece();
+        this.draw();
     }
 
     drawNextPiece() {
