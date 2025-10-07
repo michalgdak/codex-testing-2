@@ -1,6 +1,6 @@
 const COLS = 10;
 const ROWS = 20;
-const BLOCK_SIZE = 30;
+let BLOCK_SIZE = 30;
 const DROP_BASE_INTERVAL = 1000;
 
 const COLORS = {
@@ -264,6 +264,12 @@ class Game {
         this.gameOver = false;
         this.paused = false;
         this.animationFrame = null;
+        this.previewBlockSize = 24;
+        this.resizeRaf = null;
+
+        this.handleResize = this.handleResize.bind(this);
+        this.updateCanvasSizes();
+        window.addEventListener('resize', this.handleResize);
 
         this.registerEvents();
         this.drawBoard();
@@ -342,6 +348,7 @@ class Game {
         this.gameOver = false;
         this.paused = false;
         this.nextPiece = this.randomPiece();
+        this.updateCanvasSizes();
         this.spawnPiece();
         this.hideOverlay();
         this.updateStats();
@@ -599,7 +606,7 @@ class Game {
         ctx.clearRect(0, 0, this.nextCanvas.width, this.nextCanvas.height);
         const matrix = this.nextPiece.matrix;
         const size = matrix.length;
-        const previewBlock = 24;
+        const previewBlock = this.previewBlockSize;
         const offsetX = (this.nextCanvas.width - size * previewBlock) / 2;
         const offsetY = (this.nextCanvas.height - size * previewBlock) / 2;
 
@@ -614,6 +621,75 @@ class Game {
                     ctx.strokeRect(px, py, previewBlock - 2, previewBlock - 2);
                 }
             });
+        });
+    }
+
+    updateCanvasSizes() {
+        const wrapper = this.boardCanvas.parentElement;
+        const container = this.boardCanvas.closest('.game-container');
+        const containerStyles = container ? getComputedStyle(container) : null;
+        const containerPadding = containerStyles
+            ? parseFloat(containerStyles.paddingLeft) + parseFloat(containerStyles.paddingRight)
+            : 0;
+        let availableWidth = container ? container.clientWidth - containerPadding : window.innerWidth - 48;
+
+        const isSingleColumn = window.innerWidth <= 840;
+        if (!isSingleColumn) {
+            const aside = container ? container.querySelector('aside') : null;
+            const main = container ? container.querySelector('main') : null;
+            const gap = main ? parseFloat(getComputedStyle(main).columnGap) || 0 : 0;
+            if (aside) {
+                const asideStyles = getComputedStyle(aside);
+                const asideMargins = parseFloat(asideStyles.marginLeft) + parseFloat(asideStyles.marginRight);
+                availableWidth -= aside.getBoundingClientRect().width + asideMargins + gap;
+            }
+        }
+
+        const wrapperStyles = getComputedStyle(wrapper);
+        const paddingX = parseFloat(wrapperStyles.paddingLeft) + parseFloat(wrapperStyles.paddingRight);
+        availableWidth = availableWidth - paddingX;
+        if (!Number.isFinite(availableWidth) || availableWidth <= 0) {
+            availableWidth = COLS * BLOCK_SIZE;
+        }
+
+        const heightAllowance = window.innerHeight - 220;
+        const availableHeight = heightAllowance > 0 ? heightAllowance : ROWS * BLOCK_SIZE;
+        const sizeByWidth = Math.floor(availableWidth / COLS);
+        const sizeByHeight = Math.floor(availableHeight / ROWS);
+        let newBlockSize = sizeByWidth || BLOCK_SIZE;
+        if (sizeByHeight > 0) {
+            newBlockSize = Math.min(newBlockSize, sizeByHeight);
+        }
+        newBlockSize = Math.max(8, Math.min(40, newBlockSize));
+
+        BLOCK_SIZE = newBlockSize;
+        this.boardCanvas.width = COLS * BLOCK_SIZE;
+        this.boardCanvas.height = ROWS * BLOCK_SIZE;
+        this.boardCanvas.style.width = `${COLS * BLOCK_SIZE}px`;
+        this.boardCanvas.style.height = `${ROWS * BLOCK_SIZE}px`;
+
+        this.previewBlockSize = Math.max(10, Math.min(28, Math.floor(BLOCK_SIZE * 0.9)));
+        const previewSize = this.previewBlockSize * 4;
+        this.nextCanvas.width = previewSize;
+        this.nextCanvas.height = previewSize;
+        this.nextCanvas.style.width = `${previewSize}px`;
+        this.nextCanvas.style.height = `${previewSize}px`;
+
+        if (this.board) {
+            this.draw();
+            if (this.nextPiece) {
+                this.drawNextPiece();
+            }
+        }
+    }
+
+    handleResize() {
+        if (this.resizeRaf) {
+            cancelAnimationFrame(this.resizeRaf);
+        }
+        this.resizeRaf = requestAnimationFrame(() => {
+            this.resizeRaf = null;
+            this.updateCanvasSizes();
         });
     }
 }
